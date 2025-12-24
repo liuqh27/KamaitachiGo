@@ -1,0 +1,51 @@
+# 二进制文件
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+bin/
+*.test
+*.out
+
+# Go 工作空间文件
+go.work
+
+# 数据文件
+data/
+*.dat
+*.db
+
+# 日志文件
+logs/
+*.log
+
+# IDE 文件
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS 文件
+.DS_Store
+Thumbs.db
+
+# 临时文件
+tmp/
+temp/
+
+# IDE/editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+Thumbs.db
+.DS_Store
+
+# Secrets
+*.pem
+*.key
+.env
