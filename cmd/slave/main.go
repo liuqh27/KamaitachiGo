@@ -9,6 +9,8 @@ import (
 	"KamaitachiGo/pkg/config"
 	"KamaitachiGo/pkg/etcd"
 	"flag"
+	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"syscall"
@@ -38,6 +40,23 @@ func main() {
 	logrus.SetFormatter(&logrus.TextFormatter{
 		FullTimestamp: true,
 	})
+
+	// Ensure logs directory exists
+	if _, err := os.Stat("logs"); os.IsNotExist(err) {
+		os.Mkdir("logs", 0755)
+	}
+
+	// Configure logrus to write to both stdout and a file for easier debugging
+	logFile, err := os.OpenFile(fmt.Sprintf("logs/slave_%s.log", cfg.Server.Port), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+	if err == nil {
+		mw := io.MultiWriter(os.Stdout, logFile)
+		logrus.SetOutput(mw)
+	} else {
+		// 如果无法打开文件，则确保至少输出到 stdout
+		logrus.SetOutput(os.Stdout)
+		logrus.Errorf("Failed to log to file, using stdout: %v", err)
+	}
+
 	logrus.Infof("Starting Kamaitachi Slave Server on port %s", cfg.Server.Port)
 
 	// 创建LRU缓存

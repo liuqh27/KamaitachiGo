@@ -1,24 +1,45 @@
 package service
 
 import (
-	"crypto/md5"
 	"fmt"
+	"sort"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"KamaitachiGo/internal/cache/lru"
 	"KamaitachiGo/internal/model"
 	"KamaitachiGo/internal/repository"
-	"KamaitachiGo/pkg/json"
 
 	"github.com/sirupsen/logrus"
 )
 
 type FinanceService struct {
 	repo      *repository.SQLiteRepository
-	cache     *lru.Cache
+	cache     *lru.Cache // 缓存 StockDataMap
 	cacheHits int64
 	cacheMiss int64
+}
+
+// StockDataMap 结构用于存储某个股票的结构化数据，方便按指标或时间周期查询
+type StockDataMap struct {
+	Snapshots map[string][]*model.SnapshotRecord // Key: indicator, Value: list of snapshot records
+	Periods   map[string][]*model.PeriodRecord   // Key: "indicator_from_to", Value: list of period records
+	// 还可以增加一个时间戳，用于判断数据是否新鲜
+	LastUpdated time.Time
+}
+
+// Len 实现 lru.Value 接口
+func (s *StockDataMap) Len() int {
+	// TODO: 根据实际数据大小计算，这里只是一个示例
+	size := 0
+	for _, records := range s.Snapshots {
+		size += len(records) * 100 // 估算每个 SnapshotRecord 约100字节
+	}
+	for _, records := range s.Periods {
+		size += len(records) * 200 // 估算每个 PeriodRecord 约200字节
+	}
+	return size
 }
 
 func NewFinanceService(repo *repository.SQLiteRepository, cacheSize int64) *FinanceService {
@@ -30,7 +51,7 @@ func NewFinanceService(repo *repository.SQLiteRepository, cacheSize int64) *Fina
 	logrus.Infof("Initializing FinanceService with cache size: %.2f MB", float64(cacheSize)/(1024*1024))
 
 	cache := lru.NewCache(cacheSize, func(key string, value lru.Value) {
-		logrus.Debugf("Cache evicted: %s", key)
+		logrus.Debugf("Cache evicted: key %s, value of type %T", key, value)
 	})
 
 	return &FinanceService{
@@ -41,37 +62,47 @@ func NewFinanceService(repo *repository.SQLiteRepository, cacheSize int64) *Fina
 	}
 }
 
-// QuerySnapshot 快照查询
 func (s *FinanceService) QuerySnapshot(req *model.SnapshotRequest) (*model.SnapshotResponse, error) {
-	// 生成缓存key
-	cacheKey := s.generateCacheKey("snapshot", req)
+	if req.Subjects == "" {
+		return nil, fmt.Errorf("subjects is required for snapshot query")
+	}
 
-	// 查询缓存
-	if cached, ok := s.cache.Get(cacheKey); ok {
-		atomic.AddInt64(&s.cacheHits, 1)
-		if cacheValue, ok := cached.(*CacheValue); ok {
-			if response, ok := cacheValue.GetSnapshotResponse(); ok {
-				logrus.Debugf("Cache hit: %s", cacheKey)
-				return response, nil
+	stockID := strings.Split(req.Subjects, ",")[0] // 使用第一个subject作为 StockDataMap 的主缓存Key
+	innerKey := generateSnapshotInnerKey(req)      // 生成 StockDataMap 内部的Key，代表精确的查询参数组合
+
+	// 尝试从缓存中获取 StockDataMap (外层缓存查询)
+	if cachedStockData, ok := s.cache.Get(stockID); ok {
+		if stockDataMap, ok := cachedStockData.(*StockDataMap); ok {
+			// 在 StockDataMap 内部查找精确的快照请求 (内层缓存查询)
+			if records, found := stockDataMap.Snapshots[innerKey]; found {
+				atomic.AddInt64(&s.cacheHits, 1) // 仅在内部完全命中时，才增加命中计数
+				return &model.SnapshotResponse{
+					StatusCode: 0,
+					StatusMsg:  "success",
+					Data:       records,
+				}, nil
+			} else {
+				// 部分命中：StockDataMap存在，但请求的精确数据不在，也算作一次Miss
+				atomic.AddInt64(&s.cacheMiss, 1)
+				// 继续执行数据库查询，并更新 StockDataMap
 			}
 		}
+	} else {
+		atomic.AddInt64(&s.cacheMiss, 1) // 完全未命中
 	}
-	atomic.AddInt64(&s.cacheMiss, 1)
-	logrus.Debugf("Cache miss: %s", cacheKey)
 
+	// 从仓库查询数据
 	var records []*model.SnapshotRecord
 	var err error
+	// 原始请求的subjects可能包含多个，repo层需要处理
+	subjects := strings.Split(req.Subjects, ",")
 
-	// 判断是topic查询还是subjects查询
 	if req.Topic != "" {
-		// 全市场查询
-		records, err = s.repo.QueryByTopic(req.Topic, req.Field, req.Order, req.Offset, req.Limit)
-	} else if req.Subjects != "" {
-		// 指定证券查询
-		subjects := strings.Split(req.Subjects, ",")
-		records, err = s.repo.QuerySnapshot(subjects, req.Field, req.Order, req.Offset, req.Limit)
+		// 全市场查询 (此逻辑目前不与StockDataMap精确绑定，可根据业务需求扩展)
+		records, err = s.repo.QueryByTopic(req.Topic, req.Field, int(req.Order), req.Offset, req.Limit)
 	} else {
-		return nil, fmt.Errorf("subjects or topic is required")
+		// 指定证券查询，支持多subject
+		records, err = s.repo.QuerySnapshot(subjects, req.Field, int(req.Order), req.Offset, req.Limit)
 	}
 
 	if err != nil {
@@ -82,48 +113,87 @@ func (s *FinanceService) QuerySnapshot(req *model.SnapshotRequest) (*model.Snaps
 		}, nil
 	}
 
+	// 获取或创建 StockDataMap
+	var stockDataMap *StockDataMap
+	if cachedStockData, ok := s.cache.Get(stockID); ok {
+		// 如果已存在StockDataMap，则获取并更新
+		stockDataMap = cachedStockData.(*StockDataMap)
+	} else {
+		// 如果不存在，则创建新的StockDataMap
+		stockDataMap = &StockDataMap{
+			Snapshots: make(map[string][]*model.SnapshotRecord),
+			Periods:   make(map[string][]*model.PeriodRecord),
+		}
+	}
+
+	// 更新 StockDataMap，并刷新外层缓存的LRU状态
+	stockDataMap.Snapshots[innerKey] = records
+	stockDataMap.LastUpdated = time.Now() // 记录更新时间
+	s.cache.Add(stockID, stockDataMap)    // 重新添加到缓存，更新LRU顺序和可能的大小
+
 	response := &model.SnapshotResponse{
 		StatusCode: 0,
 		StatusMsg:  "success",
 		Data:       records,
 	}
 
-	// 写入LRU缓存（自动淘汰最久未使用的）
-	cacheValue := NewCacheValue(response)
-	s.cache.Add(cacheKey, cacheValue)
-
 	return response, nil
+}
+
+
+
+// generateSnapshotInnerKey 为 SnapshotRequest 生成 StockDataMap 内部的 Key
+func generateSnapshotInnerKey(req *model.SnapshotRequest) string {
+	// 对IDs和Subjects进行排序，确保不同顺序的相同内容能生成相同的Key
+	ids := strings.Split(req.IDs, ",")
+	subjects := strings.Split(req.Subjects, ",")
+	sort.Strings(ids)
+	sort.Strings(subjects)
+	sortedIDs := strings.Join(ids, ",")
+	sortedSubjects := strings.Join(subjects, "_")
+
+	return fmt.Sprintf("snap_%s_%s_%d_%d_%d_%s", sortedIDs, req.Field, int(req.Order), req.Offset, req.Limit, sortedSubjects)
 }
 
 // QueryPeriod 区间查询
 func (s *FinanceService) QueryPeriod(req *model.PeriodRequest) (*model.PeriodResponse, error) {
-	// 生成缓存key
-	cacheKey := s.generateCacheKey("period", req)
+	if req.Subjects == "" {
+		return nil, fmt.Errorf("subjects is required for period query")
+	}
 
-	// 查询缓存
-	if cached, ok := s.cache.Get(cacheKey); ok {
-		atomic.AddInt64(&s.cacheHits, 1)
-		if cacheValue, ok := cached.(*CacheValue); ok {
-			if response, ok := cacheValue.GetPeriodResponse(); ok {
-				logrus.Debugf("Cache hit: %s", cacheKey)
-				return response, nil
+	stockID := strings.Split(req.Subjects, ",")[0] // 使用第一个subject作为缓存的stockID
+	innerKey := generatePeriodInnerKey(req)
+
+	// 尝试从缓存中获取 StockDataMap
+	if cachedStockData, ok := s.cache.Get(stockID); ok {
+		if stockDataMap, ok := cachedStockData.(*StockDataMap); ok {
+			// 在 StockDataMap 中查找精确的区间请求
+			if records, found := stockDataMap.Periods[innerKey]; found {
+				atomic.AddInt64(&s.cacheHits, 1) // 仅在内部完全命中时，才增加命中计数
+				logrus.Debugf("Cache hit (inner): %s - %s", stockID, innerKey)
+				return &model.PeriodResponse{
+					StatusCode: 0,
+					StatusMsg:  "success",
+					Data:       records,
+				}, nil
+			} else {
+				// 部分命中：StockDataMap存在，但请求的精确数据不在，也算作一次Miss
+				atomic.AddInt64(&s.cacheMiss, 1)
+				logrus.Debugf("Cache partial hit: %s - %s. Fetching missing data.", stockID, innerKey)
+				// 继续执行数据库查询，并更新 StockDataMap
 			}
 		}
-	}
-	atomic.AddInt64(&s.cacheMiss, 1)
-	logrus.Debugf("Cache miss: %s", cacheKey)
-
-	// 解析subjects
-	if req.Subjects == "" {
-		return &model.PeriodResponse{
-			StatusCode: 400,
-			StatusMsg:  "subjects is required",
-			Data:       nil,
-		}, nil
+	} else {
+		atomic.AddInt64(&s.cacheMiss, 1) // 完全未命中
+		logrus.Debugf("Cache miss (full): %s. Fetching from repo.", stockID)
 	}
 
-	subjects := strings.Split(req.Subjects, ",")
-	records, err := s.repo.QueryPeriod(subjects, req.From, req.To)
+	// 从仓库查询数据
+	var records []*model.PeriodRecord
+	var err error
+	subjects := strings.Split(req.Subjects, ",") // 原始请求的subjects
+
+	records, err = s.repo.QueryPeriod(subjects, req.From, req.To)
 
 	if err != nil {
 		return &model.PeriodResponse{
@@ -133,17 +203,42 @@ func (s *FinanceService) QueryPeriod(req *model.PeriodRequest) (*model.PeriodRes
 		}, nil
 	}
 
+	// 获取或创建 StockDataMap
+	var stockDataMap *StockDataMap
+	if cachedStockData, ok := s.cache.Get(stockID); ok {
+		stockDataMap = cachedStockData.(*StockDataMap)
+	} else {
+		stockDataMap = &StockDataMap{
+			Snapshots: make(map[string][]*model.SnapshotRecord),
+			Periods:   make(map[string][]*model.PeriodRecord),
+		}
+	}
+
+	// 更新 StockDataMap
+	stockDataMap.Periods[innerKey] = records
+	stockDataMap.LastUpdated = time.Now()
+	s.cache.Add(stockID, stockDataMap) // 重新添加到缓存，更新LRU
+
 	response := &model.PeriodResponse{
 		StatusCode: 0,
 		StatusMsg:  "success",
 		Data:       records,
 	}
 
-	// 写入LRU缓存
-	cacheValue := NewCacheValue(response)
-	s.cache.Add(cacheKey, cacheValue)
-
 	return response, nil
+}
+
+// generatePeriodInnerKey 为 PeriodRequest 生成 StockDataMap 内部的 Key
+func generatePeriodInnerKey(req *model.PeriodRequest) string {
+	// 对IDs和Subjects进行排序，确保不同顺序的相同内容能生成相同的Key
+	ids := strings.Split(req.IDs, ",")
+	subjects := strings.Split(req.Subjects, ",")
+	sort.Strings(ids)
+	sort.Strings(subjects)
+	sortedIDs := strings.Join(ids, ",")
+	sortedSubjects := strings.Join(subjects, "_")
+
+	return fmt.Sprintf("period_%s_%d_%d_%s", sortedIDs, req.From, req.To, sortedSubjects)
 }
 
 // WarmupCache 预热缓存
@@ -213,18 +308,6 @@ func (s *FinanceService) WarmupCache() error {
 	return nil
 }
 
-// generateCacheKey 生成缓存key
-func (s *FinanceService) generateCacheKey(prefix string, req interface{}) string {
-	data, _ := json.Marshal(req)
-	hash := md5.Sum(data)
-	return fmt.Sprintf("%s:%x", prefix, hash)
-}
-
-// GetStats 获取统计信息
-func (s *FinanceService) GetStats() (map[string]interface{}, error) {
-	return s.repo.GetStats()
-}
-
 // GetCacheStats 获取缓存统计
 func (s *FinanceService) GetCacheStats() map[string]interface{} {
 	hits := atomic.LoadInt64(&s.cacheHits)
@@ -236,11 +319,13 @@ func (s *FinanceService) GetCacheStats() map[string]interface{} {
 		hitRate = float64(hits) / float64(total) * 100
 	}
 
+	// logrus.Debugf("GetCacheStats: hits=%d, miss=%d, total=%d, hitRate=%.2f", hits, miss, total, hitRate)
+
 	return map[string]interface{}{
 		"entries":  s.cache.Len(),
 		"hits":     hits,
 		"misses":   miss,
-		"hit_rate": fmt.Sprintf("%.2f%%", hitRate),
+		"hit_rate": hitRate, // Return float64 directly
 	}
 }
 

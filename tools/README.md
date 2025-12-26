@@ -4,7 +4,6 @@
 本目录包含项目运行、测试与数据生成相关的工具源码（Go）。
 
 ## 工具
-- `benchmark.go`：压测库（工具依赖）。
 - `benchmark_scenarios.go`：压测场景代码（请用 `go build` 编译，而不要提交二进制）。
 - `generate_sample_db.go`：生成轻量示例 SQLite 数据库（`data/sample.db`）。
 - `check_sample_db.go`：检查示例 DB 的脚本，用于快速验证样例数据。

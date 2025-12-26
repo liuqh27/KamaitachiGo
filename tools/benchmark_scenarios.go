@@ -67,10 +67,12 @@ var (
 	nodes      = []string{"http://localhost:8080", "http://localhost:8081", "http://localhost:8082"}
 	requests   = flag.Int("requests", 5000, "Total number of requests")
 	concurrent = flag.Int("concurrent", 30, "Number of concurrent workers")
-	nodeCount  = flag.Int("nodes", 3, "Number of nodes to use from default list (ignored if nodesAddr provided)")
+	nodeCount  = flag.Int("nodes", 3, "Number of nodes to use from default list (ignored if target provided)")
 	scenario   = flag.Int("scenario", 1, "Test scenario (1-4)")
-	// 新增：支持通过命令行传入逗号分隔的节点地址（例如: -nodesAddr "http://localhost:9000"）
-	nodesAddr  = flag.String("nodesAddr", "", "Comma-separated node URLs to target (overrides default nodes)")
+	target     = flag.String("target", "", "Override target nodes (comma-separated, e.g., 'http://localhost:9000/data')")
+
+	v2Rate = flag.Float64("v2Rate", 0.0, "Fraction of requests to set use_v2_read=true (0-1)")
+	repeat     = flag.Int("repeat", 0, "Number of unique requests to generate and repeat (0 for fully random)")
 
 	errorCount = make(map[string]int64)
 	errorMutex sync.Mutex
@@ -106,7 +108,7 @@ func getRequestBody(scenarioID int) []byte {
 			"ids": "%s",
 			"subjects": "%s",
 			"field": "report_date",
-			"order": "desc",
+			"order": -1,
 			"limit": 20,
 			"offset": 0
 		}`, strings.Join(ids, ","), strings.Join(subjects, ",")))
@@ -119,7 +121,7 @@ func getRequestBody(scenarioID int) []byte {
 			"ids": "%s",
 			"subjects": "%s",
 			"field": "operating_income",
-			"order": "desc",
+			"order": -1,
 			"limit": 8,
 			"offset": 0
 		}`, strings.Join(ids, ","), subject))
@@ -140,7 +142,7 @@ func getRequestBody(scenarioID int) []byte {
 			"ids": "%s",
 			"subjects": "%s",
 			"field": "operating_income",
-			"order": "desc",
+			"order": -1,
 			"limit": 20,
 			"offset": 0
 		}`, strings.Join(ids, ","), strings.Join(subjects, ",")))
@@ -153,7 +155,7 @@ func getRequestBody(scenarioID int) []byte {
 			"ids": "%s",
 			"subjects": "%s",
 			"field": "operating_income",
-			"order": "desc",
+			"order": -1,
 			"limit": 10,
 			"offset": 0,
 			"timestamp": 1696032000
@@ -166,13 +168,13 @@ func getRequestBody(scenarioID int) []byte {
 func getScenarioName(id int) string {
 	switch id {
 	case 1:
-		return "场景1: 多实体、多指标取区间数据 (目标QPS: 300)"
+		return "Scenario 1: Multi-Entity, Multi-Indicator, Snapshot Query (Target QPS: 300)"
 	case 2:
-		return "场景2: 单实体、多指标取最近几条 (目标QPS: 500)"
+		return "Scenario 2: Single-Entity, Multi-Indicator, Snapshot Query (Target QPS: 500)"
 	case 3:
-		return "场景3: 多实体最新数据+排序分页 (目标QPS: 10000+)"
+		return "Scenario 3: Multi-Entity, Snapshot Query with Pagination (Target QPS: 10000+)"
 	case 4:
-		return "场景4: 多实体指定日期+排序分页 (目标QPS: 300)"
+		return "Scenario 4: Multi-Entity, Snapshot Query with Timestamp (Target QPS: 300)"
 	}
 	return "Unknown"
 }
@@ -181,11 +183,11 @@ func main() {
 	flag.Parse()
 	rand.Seed(time.Now().UnixNano())
 
-	// 计算 activeNodes：优先使用 -nodesAddr，如果未提供则使用默认列表的前 N 个
+	// 计算 activeNodes：优先使用 -target，如果未提供则使用默认列表的前 N 个
 	var activeNodes []string
-	if strings.TrimSpace(*nodesAddr) != "" {
+	if strings.TrimSpace(*target) != "" {
 		// 从命令行解析逗号分隔的节点地址
-		parts := strings.Split(*nodesAddr, ",")
+		parts := strings.Split(*target, ",")
 		for _, p := range parts {
 			s := strings.TrimSpace(p)
 			if s != "" {
@@ -209,7 +211,11 @@ func main() {
 	fmt.Printf("Scenario: %s\n", getScenarioName(*scenario))
 	fmt.Printf("Nodes: %d\n", *nodeCount)
 	fmt.Printf("Requests: %d\n", *requests)
-	fmt.Printf("Concurrent: %d\n\n", *concurrent)
+	fmt.Printf("Concurrent: %d\n", *concurrent)
+	if *repeat > 0 {
+		fmt.Printf("Repeat requests: %d unique requests will be generated and repeated.\n", *repeat)
+	}
+	fmt.Println()
 
 	fmt.Println("Nodes:")
 	for _, node := range activeNodes {
@@ -219,6 +225,17 @@ func main() {
 			fmt.Printf("  %s - FAILED\n", node)
 			return
 		}
+	}
+
+	// Generate request pool if repeat is enabled
+	var requestPool [][]byte
+	if *repeat > 0 {
+		fmt.Printf("Generating %d unique requests for the pool...\n", *repeat)
+		requestPool = make([][]byte, *repeat)
+		for i := 0; i < *repeat; i++ {
+			requestPool[i] = getRequestBody(*scenario)
+		}
+		fmt.Println("Request pool generated.")
 	}
 
 	client := &http.Client{
@@ -263,8 +280,13 @@ func main() {
 				node := activeNodes[reqID%len(activeNodes)]
 				url := node + "/kamaitachi/api/data/v1/snapshot"
 
-				requestBody := getRequestBody(*scenario)
-
+				var requestBody []byte
+				if *repeat > 0 {
+					requestBody = requestPool[reqID%len(requestPool)]
+				} else {
+					requestBody = getRequestBody(*scenario)
+				}
+				
 				reqStart := time.Now()
 				success := executeRequest(client, url, requestBody)
 				latency := time.Since(reqStart).Milliseconds()

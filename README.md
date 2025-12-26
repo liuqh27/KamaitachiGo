@@ -10,126 +10,109 @@ KamaitachiGo 是一个用 Go 实现的分布式时序数据缓存参考实现。
 
 - 纯 Go 实现（无 CGO），便于构建与跨平台部署
 - Master + 多 Slave 分布式架构，单节点使用独立 SQLite 数据库以降低文件锁竞争
+- **Gateway层引入一致性哈希，确保特定主题请求路由到固定节点，实现数据局部性**
+- **Slave层实现“数据感知”的二级缓存，智能存储结构化数据，大幅提升多维度查询命中率**
 - 内存 LRU 缓存与查询优化，提升吞吐与降低延迟
 - 支持限流与熔断示例实现
-- 自研压测工具（位于 `tools/`）支持多场景压测
+- 自研压测工具（位于 `tools/`）支持多场景压测，并可模拟热点数据访问
 
 ---
 
-## 运行模式（两种）
+## 项目演进与优化 (Project Evolution & Optimization)
 
-1) 直接模式（不使用 Gateway）
+本项目从一个最初的分布式时序数据缓存原型，逐步演进和优化，以解决实际场景中遇到的性能挑战，并提升系统的可观测性与可测试性。
 
-- 描述：客户端或压测工具直接请求后端节点地址（例如 `http://localhost:8081`）。
-- 适用场景：关注单节点性能、调试或对比节点差异。
-- 示例（手动启动节点并压测）：
+### 初始挑战 (随机路由，命中率低下)
 
-```powershell
-.\bin\master -db data/master.db
-.\bin\slave -config conf/slave.ini -db data/slave1.db
-.\bin\slave -config conf/slave2.ini -db data/slave2.db
-.\bin\benchmark_scenarios -scenario 1 -requests 10000 -concurrent 50 -nodesAddr "http://localhost:8081,http://localhost:8082"
-```
+项目最初的网关（Gateway）采用简单的**随机路由策略**将请求分发至后端Slave节点。这种策略在分布式缓存场景下存在严重缺陷：对相同数据的请求可能被分发到不同的Slave，导致每个Slave无法有效积累缓存，集群整体缓存命中率极低，性能不佳。
 
-2) Gateway 模式（通过统一网关代理）
+### 优化阶段一：引入一致性哈希，实现数据局部性
 
-- 描述：对外通过 Gateway（如 `http://localhost:9000/data/...`）统一入口，Gateway 负责路由、负载均衡、限流与熔断。
-- 注意：Gateway 代理时会对路径做处理（例如去掉 `/data` 前缀），具体实现请查看 `cmd/gateway`。
-- 示例（启动 Gateway 并通过 Gateway 压测）：
+为解决随机路由导致的命中率低下问题，我们对网关进行了关键性改造：
+-   **核心**: 引入**一致性哈希 (Consistent Hashing)**。网关现在会根据请求内容中的`subjects`（例如：股票代码）计算哈希值，并将请求稳定地路由到哈希环上的唯一一个Slave节点。
+-   **优势**: 这保证了特定`subjects`的所有请求总会落到同一个Slave节点上，极大地提升了**数据局部性 (Data Locality)**，为后续Slave节点内部的有效缓存奠定了基础。
+-   **实现**: 网关通过etcd进行服务发现，动态维护和更新一致性哈希环。
 
-```powershell
-.\bin\gateway -config conf/gateway.ini
-.\bin\benchmark_scenarios -scenario 1 -requests 10000 -concurrent 50 -nodesAddr "http://localhost:9000/data"
-```
+### 优化阶段二：Slave侧“数据感知”的二级缓存 (Data-Aware L2 Cache)
 
-选择建议：直接模式用于节点级别诊断与性能基线；Gateway 模式用于对外压力评估与验证统一限流/路由策略。
+在Gateway确保了数据局部性之后，我们进一步优化了Slave节点的缓存策略：
+-   **挑战**: 即使Gateway将同一`subjects`的请求路由到同一个Slave，如果请求中其他参数（如查询的`indicators`、`时间范围`）频繁变化，Slave内部以“完整请求”为Key的缓存依然会导致大量未命中。
+-   **核心**: 将Slave的缓存从“请求签名”级别提升至“**数据感知”级别**。我们设计了`StockDataMap`结构来存储某个股票的结构化数据。
+-   **优势**: 缓存Key从`hash(完整请求)`变为`subjects`（股票ID）。缓存Value为一个`StockDataMap`对象，内部包含该股票多个指标和时间范围的数据。当对某股票的请求到达时，Slave可以：
+    1.  如果`StockDataMap`不存在，则从数据库获取数据并构建`StockDataMap`存入缓存。
+    2.  如果`StockDataMap`存在，则在其中查找请求数据。若部分数据缺失，则仅获取缺失部分并**更新`StockDataMap`**。
+    3.  这大幅提高了在“同一股票，不同指标或时间范围查询”场景下的**缓存命中率**和**QPS**。
+
+### 优化阶段三：增强可衡量性，量化优化成果
+
+为了能够准确地评估和展示优化效果，我们对系统进行了可观测性方面的增强：
+-   **基准测试工具升级**: `tools/benchmark_scenarios`工具增加了`-repeat`参数，允许生成固定数量的独特请求并重复发送，以便在接近真实场景的“热点”数据访问模式下，准确衡量缓存命中率和系统性能。
+-   **Gateway统计接口**: Gateway新增`/kamaitachi/api/data/v1/stats`接口，能够聚合所有Slave节点的缓存命中/未命中数，并计算集群整体的缓存命中率，为性能调优提供直观数据。
 
 ---
 
-## 启动脚本
-## 启动脚本
+## 性能指标 (Performance)
 
-- 推荐脚本：`start_cluster.ps1`（或 `start_3nodes.ps1`）可一键启动 Master、两个 Slave 与 Gateway（若存在），并做基本健康检查。  
-- 脚本路径：[KamaitachiGo/scripts/start_cluster.ps1](KamaitachiGo/scripts/start_cluster.ps1)
+以下为在 `Intel Core i7-10700 CPU`, `32GB RAM`, `Windows 11` 环境下，运行一个2节点的Slave集群所测得的性能数据。所有测试均基于 `10000` 次请求，`50` 并发。
 
-示例：
+| 场景 | 描述 | 实际QPS | 缓存命中率 | 平均延迟 (ms) | P95 延迟 (ms) |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **S1 (热点数据)** | 多实体、多指标查询 (`-repeat 10`) | **~3010** | **99.71%** | 16 | 26 |
+| **S1 (无热点数据)** | 多实体、多指标查询 (无 `-repeat`) | **~3347** | **84.18%** | 14 | 17 |
+| **S2 (热点数据)** | 单实体、多指标查询 (`-repeat 10`) | **~3672** | **99.82%** | 13 | 16 |
+| **S3 (热点数据)** | 多实体、分页查询 (`-repeat 10`) | **~3581** | **99.83%** | 13 | 16 |
+| **S4 (热点数据)** | 多实体、带日期查询 (`-repeat 10`) | **~3370** | **99.84%** | 14 | 17 |
 
-```powershell
-.\scripts\start_cluster.ps1
-```
+* **关于“无热点数据”命中率的说明**: 在该场景下，压测工具从一个有限的Key池中（8个股票代码，6个指标）随机组合生成请求。即使不使用`-repeat`参数，在10000次请求中也必然会出现大量重复，因此命中率依然较高。这验证了缓存在有限Key空间下的重复访问能力。
 
 ---
 
 ## 快速开始
 
-前提：已安装 Go 1.21+
+### 前提
 
-1. 构建（可选）：
+- 已安装 Go (1.21+)
+- 已安装并启动 etcd
 
-```bash
-go build -o bin/master cmd/master/main.go
-go build -o bin/slave cmd/slave/main.go
-go build -o bin/gateway cmd/gateway/main.go
-go build -o bin/benchmark_scenarios tools/benchmark_scenarios.go
-```
+### 启动
 
-或直接运行源代码：
-
-```bash
-go run cmd/master/main.go
-go run cmd/slave/main.go -config conf/slave.ini
-go run cmd/gateway/main.go
-```
-
-2. 生成示例数据（轻量用于演示）：
-
-```bash
-go run tools/generate_sample_db.go
-# 结果：data/sample.db
-```
-
-3. 验证健康接口：
+我们提供了强大的一键启动脚本，它会自动完成**编译、清理、启动、健康检查**所有步骤。
 
 ```powershell
-Invoke-RestMethod -Uri "http://localhost:9000/health"
+# 在项目根目录运行
+.\scripts\start_cluster.ps1
 ```
 
----
+脚本成功运行后，所有服务（Master, 2 Slaves, Gateway）将在最小化窗口中于后台运行。
 
-## 配置与数据
+### 测试
 
-- `conf/` 目录应仅保留示例配置，发布时建议使用 `conf/*.ini.example` 并把敏感字段标注为 `REPLACE_ME`。
-- 仓库包含生成与脱敏工具（`tools/`），生产测试请使用受控私有数据或自行准备数据集。
+在集群启动后，可以运行压测工具进行测试：
+
+```powershell
+# 运行场景1进行压测
+.\bin\benchmark_scenarios.exe -scenario 1 -requests 10000 -concurrent 50 -target "http://localhost:9000/data" -repeat 10
+```
+
+### 查看集群状态
+
+通过访问 Gateway 的 `/stats` 接口，可以实时查看整个集群的缓存状态：
+
+```powershell
+# 使用 PowerShell
+Invoke-RestMethod -Uri http://localhost:9000/kamaitachi/api/data/v1/stats | ConvertTo-Json -Depth 5
+
+# 或使用 curl
+curl http://localhost:9000/kamaitachi/api/data/v1/stats
+```
 
 ---
 
 ## 文档
 
-- 测试与部署说明请参见： [KamaitachiGo/测试流程手册.md](KamaitachiGo/测试流程手册.md)
+- 测试与部署说明请参见： [docs/archive/测试流程手册.md](docs/archive/测试流程手册.md)
 - 其它技术文档位于 `docs/archive/`
 
 ---
-
-
-## 文档目录（docs/archive）
-
-- [docs/archive/doc.md](docs/archive/doc.md)
-- [docs/archive/PROJECT_STRUCTURE.md](docs/archive/PROJECT_STRUCTURE.md)
-- [docs/archive/分布式部署指南.md](docs/archive/%E5%88%86%E5%B8%83%E5%BC%8F%E9%83%A8%E7%BD%B2%E6%8C%87%E5%8D%97.md)
-- [docs/archive/测试流程手册.md](docs/archive/%E6%B5%8B%E8%AF%95%E6%B5%81%E7%A8%8B%E6%89%8B%E5%86%8C.md)
-- [docs/archive/环境要求与依赖.md](docs/archive/%E7%8E%AF%E5%A2%83%E8%A6%81%E6%B1%82%E4%B8%8E%E4%BE%9D%E8%B5%96.md)
-- [docs/archive/缓存机制与测试说明.md](docs/archive/%E7%BC%93%E5%AD%98%E6%9C%BA%E5%88%B6%E4%B8%8E%E6%B5%8B%E8%AF%95%E8%AF%B4%E6%98%8E.md)
-
-如果你希望我把某些已删除的文档恢复到 `docs/`，请告诉我要恢复的文件名或把它们放回 `docs/`，我会更新目录并在 README 中链接。
-
----
-
-## 构建与测试
-
-```bash
-go build ./...
-go test ./...
-go fmt ./...
-go vet ./...
-```
+**版本**: v1.1
 

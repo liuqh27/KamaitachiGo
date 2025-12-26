@@ -1,4 +1,8 @@
-# 项目结构详解
+# 项目结构详解 v1.1
+
+本文档详细描述了 KamaitachiGo 项目的目录结构、模块职责以及核心数据流。
+
+---
 
 ## 完整目录树
 
@@ -6,370 +10,128 @@
 KamaitachiGo/
 │
 ├── cmd/                          # 应用程序入口
-│   ├── master/                   # 主节点服务（用于数据管理）
-│   │   └── main.go              # 主节点启动文件
-│   ├── slave/                    # 从节点服务（用于数据查询）
-│   │   └── main.go              # 从节点启动文件
-│   └── gateway/                  # 网关服务（用于请求路由）
-│       └── main.go              # 网关启动文件
+│   ├── master/                   # 主节点服务 (用于集群管理)
+│   │   └── main.go
+│   ├── slave/                    # 从节点服务 (核心工作节点)
+│   │   └── main.go
+│   └── gateway/                  # 网关服务 (请求路由与分发)
+│       └── main.go
 │
-├── internal/                     # 内部实现（不对外暴露）
-│   ├── cache/                   # 缓存层实现
-│   │   ├── lru/                 # LRU缓存算法
-│   │   │   └── lru.go          # LRU缓存核心实现
-│   │   └── snapshot/            # 快照管理
-│   │       └── manager.go       # 快照管理器
+├── internal/                     # 内部实现 (项目核心逻辑)
+│   ├── cache/                    # 缓存层实现
+│   │   ├── lru/                  # LRU缓存算法
+│   │   │   └── lru.go
+│   │   └── snapshot/             # 缓存快照管理
+│   │       └── manager.go
 │   │
-│   ├── model/                   # 数据模型定义
-│   │   ├── common.go           # 公共模型（SecuritySubject, TableInfo等）
-│   │   ├── datainfo.go         # 数据信息模型
-│   │   ├── snapshot.go         # 快照请求/响应模型
-│   │   └── period.go           # 区间请求/响应模型
+│   ├── model/                    # 数据模型定义
+│   │   ├── api_models.go         # API请求/响应模型 (SnapshotRequest, PeriodRequest等)
+│   │   ├── common.go             # 通用数据结构
+│   │   └── ...
 │   │
-│   ├── service/                 # 业务逻辑层
-│   │   ├── datainfo_service.go # 数据信息服务
-│   │   └── query_service.go    # 查询服务
+│   ├── service/                  # 业务逻辑层
+│   │   ├── finance_service.go    # 核心金融数据服务, 包含二级缓存逻辑
+│   │   └── ...
 │   │
-│   ├── repository/              # 数据访问层
-│   │   └── memory_repository.go # 内存存储仓库
+│   ├── repository/               # 数据访问层
+│   │   ├── sqlite_repository.go  # SQLite数据库仓库实现
+│   │   └── memory_repository.go  # (旧) 内存存储仓库
 │   │
-│   └── handler/                 # HTTP处理器
-│       ├── data_handler.go     # 数据管理接口
-│       ├── query_handler.go    # 查询接口
-│       └── router.go           # 路由配置
+│   └── handler/                  # HTTP处理器 (胶水层)
+│       ├── finance_handler.go    # 金融数据API处理器
+│       └── ...
 │
-├── pkg/                          # 公共包（可对外暴露）
-│   ├── config/                  # 配置管理
-│   │   └── config.go           # 配置加载器
-│   │
-│   ├── etcd/                    # etcd客户端
-│   │   └── etcd.go             # 服务注册与发现
-│   │
-│   ├── hash/                    # 一致性哈希
-│   │   └── consistenthash.go   # 一致性哈希实现
-│   │
-│   └── common/                  # 通用工具
-│       ├── byteview.go         # 字节视图
-│       └── response.go         # HTTP响应结构
+├── pkg/                          # 公共包 (可被外部项目复用)
+│   ├── config/                   # 配置管理
+│   │   └── config.go
+│   ├── etcd/                     # etcd客户端 (服务注册与发现)
+│   │   └── etcd.go
+│   └── hash/                     # 一致性哈希
+│       └── consistenthash.go
 │
-├── api/                          # API定义
-│   └── proto/                   # protobuf定义（预留扩展）
+├── api/                          # API定义 (预留扩展)
+│   └── proto/
 │
 ├── conf/                         # 配置文件
-│   ├── master.ini              # 主节点配置
-│   ├── slave.ini               # 从节点配置
-│   └── gateway.ini             # 网关配置
+│   ├── master.ini, slave1.ini, slave2.ini, gateway.ini
 │
-├── data/                         # 数据目录（运行时生成）
-│   ├── master_snapshot.dat     # 主节点快照
-│   └── slave_snapshot.dat      # 从节点快照
+├── data/                         # 数据目录 (运行时生成)
 │
-├── go.mod                        # Go模块定义
-├── go.sum                        # 依赖版本锁定
-├── .gitignore                    # Git忽略文件
-├── Makefile                      # 构建脚本
-├── README.md                     # 项目说明
-├── EXAMPLE.md                    # 使用示例
-├── doc.md                        # 技术文档
-└── PROJECT_STRUCTURE.md          # 本文件
+├── scripts/                      # 自动化脚本
+│   ├── start_cluster.ps1         # (推荐) 一键构建并启动整个集群
+│   └── demo.ps1                  # 用于演示特定场景的脚本
+│
+├── tools/                        # 开发与测试工具
+│   ├── benchmark_scenarios.go    # 场景化压测工具
+│   └── generate_sample_db.go     # 示例数据库生成工具
+│
+├── go.mod, go.sum, Makefile, README.md, ...
 ```
 
 ## 各模块详细说明
 
-### 1. cmd/ - 应用程序入口
+### 1. `cmd/` - 应用程序入口
+- **职责**: 定义三个核心服务（Master, Slave, Gateway）的启动入口。每个 `main.go` 文件负责初始化依赖、加载配置、设置路由并启动HTTP服务。
 
-**职责**：定义不同类型服务的启动入口
+### 2. `internal/` - 内部核心逻辑
+- **职责**: 实现项目所有不对外的核心业务逻辑。这是项目的心脏。
+- **`handler/`**: 作为胶水层，负责解析 HTTP 请求，调用 `service` 层处理，并返回 HTTP 响应。`finance_handler.go` 是我们API的主要处理器。
+- **`service/`**: 业务逻辑的核心。`finance_service.go` 实现了查询逻辑，并包含了关键的**“数据感知”二级缓存 (`StockDataMap`)** 机制。
+- **`repository/`**: 数据访问层。`sqlite_repository.go` 负责与 SQLite 数据库进行交互，执行实际的 SQL 查询。
+- **`cache/`**: 通用缓存组件。`lru/lru.go` 提供了线程安全的 LRU 缓存实现。
+- **`model/`**: 定义项目中使用的数据结构，`api_models.go` 中定义了所有对外API的请求和响应体。
 
-#### cmd/master/main.go
-- 启动主节点服务
-- 初始化缓存和快照
-- 注册到 etcd
-- 提供数据管理接口
+### 3. `pkg/` - 公共包
+- **职责**: 提供可在项目内外复用的通用功能库。
+- **`etcd/`**: 封装了与 etcd 的交互，用于服务注册和发现。Gateway 用它来感知 Slave 节点的变化。
+- **`hash/`**: 实现了**一致性哈希算法**，是 Gateway 实现请求稳定路由的核心。
+- **`config/`**: 提供加载 `.ini` 格式配置文件的能力。
 
-#### cmd/slave/main.go
-- 启动从节点服务
-- 初始化缓存和快照
-- 注册到 etcd
-- 提供数据查询接口
+### 4. `scripts/` & `tools/` - 脚本与工具
+- **`scripts/`**: 存放自动化运维脚本。`start_cluster.ps1` 是最重要的脚本，能够一键完成环境清理、编译、启动和健康检查。
+- **`tools/`**: 存放独立的辅助程序。`benchmark_scenarios.go` 是我们用来量化性能、验证优化的强大压测工具。
 
-#### cmd/gateway/main.go
-- 启动网关服务
-- 连接 etcd 发现节点
-- 实现请求路由和负载均衡
-- 代理请求到后端节点
+---
 
-### 2. internal/ - 内部实现
+## 核心数据流 (查询流程)
 
-**职责**：核心业务逻辑和数据处理
-
-#### internal/cache/ - 缓存层
-
-**lru/lru.go**
-- LRU缓存算法实现
-- 支持容量限制
-- 支持数据过期
-- 线程安全
-
-**snapshot/manager.go**
-- 快照保存和加载
-- 定期自动保存
-- JSON格式存储
-- 原子性写入
-
-#### internal/model/ - 数据模型
-
-**datainfo.go**
-- DataInfo: 核心数据结构
-- DataInfoOption: 查询选项
-- DataSet: 数据集合
-
-**snapshot.go**
-- SnapshotRequest: 快照请求
-- SnapshotData: 快照响应
-
-**period.go**
-- PeriodRequest: 区间请求
-- PeriodData: 区间响应
-
-**common.go**
-- SecuritySubject: 证券实体
-- SubjectsGroup: 实体分组
-- TableInfo: 表信息
-- KamaitachiError: 错误类型
-
-#### internal/service/ - 服务层
-
-**datainfo_service.go**
-- 数据保存、查询、删除
-- 表信息管理
-- 业务逻辑处理
-
-**query_service.go**
-- 快照查询
-- 区间查询
-- 实体解析和数据聚合
-
-#### internal/repository/ - 数据访问层
-
-**memory_repository.go**
-- 内存数据存储
-- 缓存操作封装
-- 数据序列化/反序列化
-
-#### internal/handler/ - HTTP处理器
-
-**data_handler.go**
-- POST /data/v1/save - 保存数据
-- GET /data/v1/get/:id - 获取数据
-- POST /data/v1/search - 搜索数据
-- DELETE /data/v1/delete/:id - 删除数据
-
-**query_handler.go**
-- POST /data/v1/snapshot - 快照查询
-- POST /data/v1/period - 区间查询
-
-**router.go**
-- 路由配置
-- 中间件注册
-- 健康检查接口
-
-### 3. pkg/ - 公共包
-
-**职责**：可复用的工具和组件
-
-#### pkg/config/ - 配置管理
-
-**config.go**
-- 配置文件加载（INI格式）
-- 配置结构定义
-- 数据库DSN生成
-
-#### pkg/etcd/ - etcd客户端
-
-**etcd.go**
-- 服务注册与心跳
-- 服务发现
-- 键值操作（Get/Put/Delete）
-- 监听（Watch）
-
-#### pkg/hash/ - 一致性哈希
-
-**consistenthash.go**
-- 一致性哈希环
-- 虚拟节点
-- 节点增删
-- 负载均衡
-
-#### pkg/common/ - 通用工具
-
-**byteview.go**
-- 只读字节视图
-- 防止数据被意外修改
-
-**response.go**
-- 统一HTTP响应格式
-- 成功/失败响应构建
-
-### 4. api/ - API定义
-
-**职责**：对外接口定义（预留扩展）
-
-可以添加：
-- protobuf 定义
-- GraphQL schema
-- OpenAPI 规范
-
-### 5. conf/ - 配置文件
-
-**职责**：不同环境的配置
-
-#### master.ini
-- 主节点配置
-- 端口：8080
-- 支持数据写入和读取
-
-#### slave.ini
-- 从节点配置
-- 端口：8081+
-- 只支持数据读取
-
-#### gateway.ini
-- 网关配置
-- 端口：9000
-- 请求路由和负载均衡
-
-## 数据流向
-
-### 写入流程
+```mermaid
+graph TD
+    A[Client] -- HTTP Request --> B(Gateway:9000);
+    B -- 1. 计算'subjects'的哈希 --> C{Consistent Hash Ring};
+    C -- 2. 选取目标Slave --> B;
+    B -- 3. 代理请求 --> D[Slave (e.g., :8081)];
+    
+    subgraph Slave 内部处理流程
+        D -- 4. 解析HTTP请求 --> E[finance_handler];
+        E -- 5. 调用服务 --> F[finance_service];
+        F -- 6. 查询L2缓存 (StockDataMap) --> G{L2 Cache (LRU)};
+        G -- 7a. 缓存命中 --> F;
+        F -- 8a. 直接返回数据 --> E;
+        
+        G -- 7b. 缓存未命中 --> H[sqlite_repository];
+        H -- 8b. 查询SQLite --> I[SQLite DB];
+        I -- 9. 返回数据 --> H;
+        H -- 10. 返回数据 --> F;
+        F -- 11. 更新L2缓存 --> G;
+        F -- 12. 返回数据 --> E;
+        
+        E -- 13. 封装HTTP响应 --> D;
+    end
+    
+    D -- 14. 返回响应 --> B;
+    B -- 15. 返回响应 --> A;
 
 ```
-客户端
-  ↓
-HTTP Request (POST /data/v1/save)
-  ↓
-data_handler.Save()
-  ↓
-datainfo_service.Save()
-  ↓
-memory_repository.Save()
-  ↓
-lru.Cache.Add()
-  ↓
-内存缓存
-  ↓
-(定期) snapshot_manager.Save()
-  ↓
-磁盘快照文件
-```
+**流程说明**:
+1. 客户端的所有请求都发送到**Gateway**。
+2. Gateway 使用**一致性哈希**算法，根据请求的`subjects`（股票代码）决定将请求转发给哪个**Slave**。
+3. Slave 内部的 `finance_handler` 接收到请求，并将其传递给 `finance_service`。
+4. `finance_service` 首先检查其**二级缓存 (`StockDataMap`)**。
+   - 如果**命中**，则直接从内存中返回数据，路径极短，性能极高。
+   - 如果**未命中**，则调用 `sqlite_repository` 从数据库查询数据，然后将查询结果**填充到二级缓存**中，再返回给客户端。这样，下一次对该股票的请求就能直接命中缓存了。
 
-### 查询流程
-
-```
-客户端
-  ↓
-HTTP Request (POST /data/v1/snapshot)
-  ↓
-query_handler.Snapshot()
-  ↓
-query_service.Snapshot()
-  ↓
-memory_repository.Get()
-  ↓
-lru.Cache.Get()
-  ↓
-返回数据
-```
-
-### 网关路由流程
-
-```
-客户端
-  ↓
-HTTP Request -> Gateway (端口9000)
-  ↓
-解析请求参数
-  ↓
-一致性哈希计算
-  ↓
-选择目标节点
-  ↓
-代理请求到节点
-  ↓
-返回结果给客户端
-```
-
-## 扩展点
-
-### 1. 数据库持久化
-
-在 `internal/repository/` 下添加：
-```
-mysql_repository.go
-postgresql_repository.go
-```
-
-### 2. gRPC 支持
-
-在 `api/proto/` 下添加：
-```
-kamaitachi.proto
-```
-
-在 `internal/handler/` 下添加：
-```
-grpc_handler.go
-```
-
-### 3. 监控指标
-
-在 `pkg/` 下添加：
-```
-pkg/metrics/
-  └── prometheus.go
-```
-
-### 4. 认证授权
-
-在 `pkg/` 下添加：
-```
-pkg/auth/
-  ├── jwt.go
-  └── middleware.go
-```
-
-## 依赖关系
-
-```
-cmd/*
-  └─> internal/handler
-        └─> internal/service
-              └─> internal/repository
-                    └─> internal/cache
-                          └─> internal/model
-
-cmd/*
-  └─> pkg/config
-  └─> pkg/etcd
-  └─> pkg/hash
-```
-
-## 接口设计原则
-
-1. **分层清晰**：handler -> service -> repository -> cache
-2. **依赖倒置**：上层依赖接口，不依赖具体实现
-3. **单一职责**：每个模块职责明确
-4. **可扩展性**：预留扩展接口
-
-## 命名规范
-
-1. **包名**：小写，简短，有意义
-2. **文件名**：小写+下划线，如 `data_handler.go`
-3. **类型名**：大驼峰，如 `DataInfo`
-4. **方法名**：大驼峰（公开），小驼峰（私有）
-5. **接口名**：-er 结尾，如 `DataInfoService`
-
-
-## 总结
-
-本项目采用清晰的分层架构，模块职责明确，易于理解和扩展。通过合理的目录组织和接口设计，可以方便地添加新功能或替换底层实现。
+---
+**最后更新**: 2025-12-26  
+**版本**: v1.1
 

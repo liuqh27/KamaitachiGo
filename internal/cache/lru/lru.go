@@ -41,8 +41,8 @@ func NewCache(maxBytes int64, onEvicted func(string, Value)) *Cache {
 
 // Get 获取缓存值
 func (c *Cache) Get(key string) (Value, bool) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	
 	if ele, ok := c.cache[key]; ok {
 		entry := ele.Value.(*Entry)
